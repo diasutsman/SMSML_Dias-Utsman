@@ -1,0 +1,15 @@
+artifact_uri: file:///home/du/CascadeProjects/SMSML_Dias-Utsman/Monitoring%20dan%20Logging/mlruns/0/0d6b608c5b774dbba5f151f1b495b9c9/artifacts
+end_time: 1746266476484
+entry_point_name: ''
+experiment_id: '0'
+lifecycle_stage: active
+run_id: 0d6b608c5b774dbba5f151f1b495b9c9
+run_name: iris_model
+run_uuid: 0d6b608c5b774dbba5f151f1b495b9c9
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1746266471294
+status: 3
+tags: []
+user_id: du

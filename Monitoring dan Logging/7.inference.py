@@ -113,7 +113,7 @@ async def metrics():
     return generate_latest()
 
 # Root endpoint
-@app.get("/", response_class_name=HTMLResponse)
+@app.get("/", response_class=HTMLResponse)
 async def root():
     return """
     <html>
@@ -164,11 +164,11 @@ async def root():
             </style>
         </head>
         <body>
-            <div class_name="container">
+            <div class="container">
                 <h1>Iris Classification API</h1>
                 <p>API for predicting Iris species based on flower measurements.</p>
                 
-                <div class_name="endpoint">
+                <div class="endpoint">
                     <h3>Predict Endpoint</h3>
                     <p>Make predictions by sending POST requests to <code>/predict</code> with JSON data.</p>
                     <p>Example:</p>
@@ -180,17 +180,17 @@ async def root():
 }</code></pre>
                 </div>
                 
-                <div class_name="endpoint">
+                <div class="endpoint">
                     <h3>Metrics Endpoint</h3>
                     <p>Access Prometheus metrics at <a href="/metrics">/metrics</a></p>
                 </div>
                 
-                <div class_name="endpoint">
+                <div class="endpoint">
                     <h3>Health Check</h3>
                     <p>Check API health at <a href="/health">/health</a></p>
                 </div>
                 
-                <div class_name="footer">
+                <div class="footer">
                     <p>Created by Dias Utsman | MLOps System</p>
                 </div>
             </div>
