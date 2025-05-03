@@ -113,7 +113,7 @@ async def metrics():
     return generate_latest()
 
 # Root endpoint
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class_name=HTMLResponse)
 async def root():
     return """
     <html>
@@ -164,11 +164,11 @@ async def root():
             </style>
         </head>
         <body>
-            <div class="container">
+            <div class_name="container">
                 <h1>Iris Classification API</h1>
                 <p>API for predicting Iris species based on flower measurements.</p>
                 
-                <div class="endpoint">
+                <div class_name="endpoint">
                     <h3>Predict Endpoint</h3>
                     <p>Make predictions by sending POST requests to <code>/predict</code> with JSON data.</p>
                     <p>Example:</p>
@@ -180,17 +180,17 @@ async def root():
 }</code></pre>
                 </div>
                 
-                <div class="endpoint">
+                <div class_name="endpoint">
                     <h3>Metrics Endpoint</h3>
                     <p>Access Prometheus metrics at <a href="/metrics">/metrics</a></p>
                 </div>
                 
-                <div class="endpoint">
+                <div class_name="endpoint">
                     <h3>Health Check</h3>
                     <p>Check API health at <a href="/health">/health</a></p>
                 </div>
                 
-                <div class="footer">
+                <div class_name="footer">
                     <p>Created by Dias Utsman | MLOps System</p>
                 </div>
             </div>
@@ -227,7 +227,7 @@ def predict(features: IrisFeatures):
             
             # Make prediction
             prediction = int(model.predict(feature_array)[0])
-            PREDICTIONS.labels(class=class_names[prediction]).inc()
+            PREDICTIONS.labels(class_name=class_names[prediction]).inc()
             
             # Get probabilities if available
             probabilities = {}
@@ -236,7 +236,7 @@ def predict(features: IrisFeatures):
                 for i, p in enumerate(proba):
                     class_name = class_names[i]
                     probabilities[class_name] = float(p)
-                    MODEL_CONFIDENCE.labels(class=class_name).observe(p)
+                    MODEL_CONFIDENCE.labels(class_name=class_name).observe(p)
             
             # Calculate processing time
             processing_time = time.time() - start_time
