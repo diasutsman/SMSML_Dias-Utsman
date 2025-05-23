@@ -1,0 +1,101 @@
+name: ML Model CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'MLProject/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  train-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install mlflow==2.19.0 scikit-learn pandas numpy matplotlib seaborn joblib pytest
+        pip install dagshub
+        
+    - name: Run Tests
+      run: |
+        pytest MLProject/tests/ -v
+        
+    - name: Set MLflow tracking URI
+      run: |
+        # For DagsHub integration (if using DagsHub)
+        echo "MLFLOW_TRACKING_USERNAME=${{ secrets.MLFLOW_TRACKING_USERNAME }}" >> $GITHUB_ENV
+        echo "MLFLOW_TRACKING_PASSWORD=${{ secrets.MLFLOW_TRACKING_PASSWORD }}" >> $GITHUB_ENV
+        echo "MLFLOW_TRACKING_URI=https://dagshub.com/diasutsman/SMSML_Dias-Utsman.mlflow" >> $GITHUB_ENV
+        
+    - name: Run MLflow Project
+      run: |
+        mlflow run MLProject --no-conda -P data_path=MLProject/namadataset_preprocessing/iris_preprocessed.csv -P tune_hyperparameters=true
+        
+    - name: Register Model in MLflow Model Registry
+      run: |
+        python -c "
+        import mlflow
+        from mlflow.tracking import MlflowClient
+        
+        client = MlflowClient()
+        mlflow.set_tracking_uri('${{ env.MLFLOW_TRACKING_URI }}')
+        
+        # Get the latest run
+        runs = mlflow.search_runs(experiment_ids=['0'])
+        if len(runs) > 0:
+            latest_run_id = runs.iloc[0].run_id
+            
+            # Register the model
+            model_uri = f'runs:/{latest_run_id}/model'
+            mv = mlflow.register_model(model_uri, 'iris-classifier')
+            print(f'Model registered as: {mv.name} with version {mv.version}')
+        else:
+            print('No runs found')
+        "
+        
+    - name: Build and Push Docker Image using MLflow
+      env:
+        DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
+        DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
+      run: |
+        # Get latest run ID
+        LATEST_RUN_ID=$(mlflow runs list --experiment-id 0 | awk 'NR==2 {print $4}')
+        
+        # Use MLflow to build Docker image
+        python build_docker_mlflow.py --run-id $LATEST_RUN_ID --image-name ${{ secrets.DOCKER_HUB_USERNAME }}/iris-classifier:latest
+        
+        # Login to Docker Hub and push the image
+        echo "${{ secrets.DOCKER_HUB_TOKEN }}" | docker login -u ${{ secrets.DOCKER_HUB_USERNAME }} --password-stdin
+        docker push ${{ secrets.DOCKER_HUB_USERNAME }}/iris-classifier:latest
+        
+    - name: Deploy Model for Serving
+      run: |
+        # Start the model server (background)
+        docker run -d -p 5001:8080 ${{ secrets.DOCKER_HUB_USERNAME }}/iris-classifier:latest
+        
+        # Wait for server to start
+        sleep 10
+        
+        # Test the deployment with a sample request
+        curl -X POST http://localhost:5001/invocations \
+          -H "Content-Type: application/json" \
+          -d '{"instances": [[5.1, 3.5, 1.4, 0.2]]}'
+        
+    - name: Upload run artifacts
+      uses: actions/upload-artifact@v2
+      with:
+        name: mlflow-artifacts
+        path: mlruns/

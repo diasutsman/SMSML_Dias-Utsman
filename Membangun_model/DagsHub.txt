@@ -1,0 +1,31 @@
+Tautan DagsHub: https://dagshub.com/diasutsman/SMSML_Dias-Utsman
+
+Langkah-langkah integrasi MLflow dengan DagsHub:
+
+1. Buat akun di DagsHub: https://dagshub.com
+2. Buat repository baru bernama "SMSML_Dias-Utsman"
+3. Dapatkan token akses dari pengaturan profil DagsHub
+4. Konfigurasi MLflow untuk menggunakan DagsHub:
+
+```python
+import os
+import mlflow
+
+# Set credentials
+os.environ['MLFLOW_TRACKING_USERNAME'] = 'diasutsman'
+os.environ['MLFLOW_TRACKING_PASSWORD'] = '<your_token>'  # Ganti dengan token Anda
+
+# Set tracking URI
+mlflow.set_tracking_uri('https://dagshub.com/diasutsman/SMSML_Dias-Utsman.mlflow')
+
+# Gunakan MLflow seperti biasa
+mlflow.set_experiment('Iris-Classification')
+with mlflow.start_run():
+    # Log parameters, metrics, models, dll.
+```
+
+Keuntungan menggunakan DagsHub:
+- Kolaborasi tim yang lebih mudah
+- Visualisasi eksperimen dari mana saja
+- Integrasi dengan Git dan DVC
+- Kemampuan berbagi hasil eksperimen
