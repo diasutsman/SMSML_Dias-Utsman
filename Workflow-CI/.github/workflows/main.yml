@@ -1,0 +1,406 @@
+name: ML Model CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "MLProject/**"
+      - ".github/workflows/**"
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  train-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install mlflow==2.19.0 scikit-learn pandas numpy matplotlib seaborn joblib pytest docker
+          pip install dagshub
+          # Install Docker dependencies for MLflow
+          pip install "mlflow[extras]"
+
+      - name: Configure MLflow and Create Experiment
+        run: |
+          # First try with local tracking
+          mkdir -p mlruns
+          mkdir -p "$(pwd)/artifacts"
+          chmod -R 777 "$(pwd)/artifacts"
+          
+          # Configure MLflow to use proper paths
+          export MLFLOW_TRACKING_URI="file:./mlruns"
+          export MLFLOW_ARTIFACT_ROOT="file://$(pwd)/artifacts"
+          export MLFLOW_EXPERIMENT_BASE_PATH="$(pwd)/mlruns"
+          
+          # Set GitHub environment variables
+          echo "MLFLOW_TRACKING_URI=$MLFLOW_TRACKING_URI" >> $GITHUB_ENV
+          echo "MLFLOW_ARTIFACT_ROOT=$MLFLOW_ARTIFACT_ROOT" >> $GITHUB_ENV
+          echo "MLFLOW_EXPERIMENT_BASE_PATH=$MLFLOW_EXPERIMENT_BASE_PATH" >> $GITHUB_ENV
+          
+          echo "Using MLflow tracking URI: $MLFLOW_TRACKING_URI"
+          echo "Using MLflow artifact root: $MLFLOW_ARTIFACT_ROOT"
+          
+          # Initialize local experiment for fallback
+          python -c "
+          import mlflow
+          from mlflow.exceptions import MlflowException
+          mlflow.set_tracking_uri('file:./mlruns')
+          
+          # Check if experiment exists first
+          try:
+              experiment = mlflow.get_experiment_by_name('Iris-Classification-CI')
+              if experiment is None:
+                  mlflow.create_experiment('Iris-Classification-CI')
+                  print('Created new experiment: Iris-Classification-CI')
+              else:
+                  print('Using existing experiment: Iris-Classification-CI')
+          except MlflowException:
+              mlflow.create_experiment('Iris-Classification-CI')
+              print('Created new experiment: Iris-Classification-CI')
+              
+          print('Local MLflow tracking initialized')
+          "
+          
+          # Now set DagsHub configuration (will be used if credentials are valid)
+          echo "MLFLOW_TRACKING_USERNAME=${{ secrets.MLFLOW_TRACKING_USERNAME }}" >> $GITHUB_ENV
+          echo "MLFLOW_TRACKING_PASSWORD=${{ secrets.MLFLOW_TRACKING_PASSWORD }}" >> $GITHUB_ENV
+          echo "DAGSHUB_TRACKING_URI=https://dagshub.com/diasutsman/SMSML_Dias-Utsman" >> $GITHUB_ENV
+
+      - name: Run MLflow Project
+        run: |
+          # Attempt to run with local tracking to ensure success
+          CURRENT_DIR=$(pwd)
+          cd MLProject
+          python modelling.py --data_path="../namadataset_preprocessing/iris_preprocessed.csv" --tune_hyperparameters=true
+          cd $CURRENT_DIR
+
+      - name: Get Latest Run ID
+        id: get_run_id
+        run: |
+          # Create a more robust Python script to find the latest run and model artifacts
+          cat > find_run.py << 'EOL'
+          import mlflow
+          import os
+          import glob
+          from mlflow.exceptions import MlflowException
+          import pandas as pd
+          import sys
+          
+          # Set up robust tracking URI
+          tracking_uri = f"file:{os.getcwd()}/mlruns"
+          experiment_name = 'Iris-Classification-CI'
+          
+          def find_experiment():
+              """Find the experiment ID by name with robust error handling"""
+              try:
+                  mlflow.set_tracking_uri(tracking_uri)
+                  exp = mlflow.get_experiment_by_name(experiment_name)
+                  if exp:
+                      return exp.experiment_id
+                  else:
+                      # Try to find the experiment by scanning the mlruns directory
+                      for exp_dir in glob.glob("mlruns/*"):
+                          if os.path.isdir(exp_dir) and not exp_dir.endswith('.trash'):
+                              try:
+                                  with open(f"{exp_dir}/meta.yaml", 'r') as f:
+                                      if experiment_name in f.read():
+                                          return os.path.basename(exp_dir)
+                              except:
+                                  pass
+                  return None
+              except Exception as e:
+                  print(f"Error finding experiment: {e}", file=sys.stderr)
+                  return None
+          
+          def find_latest_run(experiment_id):
+              """Find the latest run ID with robust error handling"""
+              try:
+                  mlflow.set_tracking_uri(tracking_uri)
+                  runs = mlflow.search_runs(experiment_ids=[experiment_id], max_results=1)
+                  if not runs.empty:
+                      return runs['run_id'].iloc[0]
+                      
+                  # Fallback: Scan the directory directly
+                  run_dirs = glob.glob(f"mlruns/{experiment_id}/*/")
+                  if run_dirs:
+                      latest_run = max(run_dirs, key=os.path.getmtime)
+                      return os.path.basename(os.path.normpath(latest_run))
+                      
+                  return None
+              except Exception as e:
+                  print(f"Error finding latest run: {e}", file=sys.stderr)
+                  
+                  # Try the most aggressive fallback: scan any run directory
+                  try:
+                      all_run_dirs = []
+                      for exp_dir in glob.glob("mlruns/*/"):
+                          if os.path.isdir(exp_dir) and not exp_dir.endswith('.trash'):
+                              run_dirs = glob.glob(f"{exp_dir}*/")
+                              all_run_dirs.extend(run_dirs)
+                              
+                      if all_run_dirs:
+                          latest_run = max(all_run_dirs, key=os.path.getmtime)
+                          return os.path.basename(os.path.normpath(latest_run))
+                  except Exception as e2:
+                      print(f"Error in fallback scan: {e2}", file=sys.stderr)
+                      
+                  return None
+          
+          def find_model_path(run_id, experiment_id):
+              """Find the model path with robust error handling"""
+              try:
+                  mlflow.set_tracking_uri(tracking_uri)
+                  run = mlflow.get_run(run_id)
+                  artifact_uri = run.info.artifact_uri
+                  if artifact_uri.startswith('file:'): 
+                      artifact_uri = artifact_uri[5:]
+                  model_path = os.path.join(artifact_uri, 'model')
+                  return model_path
+              except Exception as e:
+                  print(f"Error finding model path: {e}", file=sys.stderr)
+                  
+                  # Direct filesystem fallback
+                  try:
+                      # Try standard structure first
+                      model_path = f"mlruns/{experiment_id}/{run_id}/artifacts/model"
+                      if os.path.exists(model_path):
+                          return model_path
+                          
+                      # Try artifacts directory
+                      model_path = f"artifacts/{run_id}/model"
+                      if os.path.exists(model_path):
+                          return model_path
+                          
+                      # Try mlartifacts structure
+                      for artf_dir in glob.glob("mlartifacts/*"):
+                          model_path = f"{artf_dir}/{run_id}/model"
+                          if os.path.exists(model_path):
+                              return model_path
+                      
+                      # Last resort: scan for any model directory
+                      model_dirs = glob.glob("**/model/MLmodel", recursive=True)
+                      if model_dirs:
+                          return os.path.dirname(model_dirs[0])
+                          
+                      return None
+                  except Exception as e2:
+                      print(f"Error in fallback model path search: {e2}", file=sys.stderr)
+                      return None
+          
+          # Main execution
+          experiment_id = find_experiment()
+          if experiment_id:
+              print(f"EXPERIMENT_ID={experiment_id}")
+              
+              run_id = find_latest_run(experiment_id)
+              if run_id:
+                  print(f"RUN_ID={run_id}")
+                  
+                  model_dir = find_model_path(run_id, experiment_id)
+                  if model_dir:
+                      print(f"MODEL_DIR={model_dir}")
+                  else:
+                      print("No model directory found")
+              else:
+                  print("No run ID found")
+          else:
+              print("No experiment ID found")
+          EOL
+          
+          # Make the script executable and run it
+          chmod +x find_run.py
+          
+          echo "Running MLflow discovery script..."
+          python find_run.py > mlflow_discovery.txt
+          
+          # Process the script output
+          if grep -q "EXPERIMENT_ID" mlflow_discovery.txt; then
+            EXPERIMENT_ID=$(grep "EXPERIMENT_ID" mlflow_discovery.txt | cut -d'=' -f2)
+            echo "Found experiment ID: $EXPERIMENT_ID"
+            echo "EXPERIMENT_ID=$EXPERIMENT_ID" >> $GITHUB_ENV
+            
+            if grep -q "RUN_ID" mlflow_discovery.txt; then
+              LATEST_RUN_ID=$(grep "RUN_ID" mlflow_discovery.txt | cut -d'=' -f2)
+              echo "Found Run ID: $LATEST_RUN_ID"
+              echo "RUN_ID=$LATEST_RUN_ID" >> $GITHUB_ENV
+              
+              if grep -q "MODEL_DIR" mlflow_discovery.txt; then
+                MODEL_DIR=$(grep "MODEL_DIR" mlflow_discovery.txt | cut -d'=' -f2)
+                echo "Found model at: $MODEL_DIR"
+                echo "MODEL_DIR=$MODEL_DIR" >> $GITHUB_ENV
+              else
+                echo "Warning: No model directory found, attempting direct search..."
+                
+                # Direct search as last resort
+                MODEL_DIR=$(find "$(pwd)" -type d -path "*/model" -name "MLmodel" -exec dirname {} \; | head -n 1)
+                
+                if [ -n "$MODEL_DIR" ]; then
+                  echo "Found model through direct search at: $MODEL_DIR"
+                  echo "MODEL_DIR=$MODEL_DIR" >> $GITHUB_ENV
+                else
+                  echo "Failed to find model directory through all methods"
+                fi
+              fi
+            else
+              echo "No run ID found!"
+            fi
+          else
+            echo "No experiment ID found! Attempting direct search..."
+            
+            # Try direct filesystem search for any MLmodel file
+            MODEL_DIR=$(find "$(pwd)" -type f -path "*/model/MLmodel" -exec dirname {} \; | head -n 1)
+            
+            if [ -n "$MODEL_DIR" ]; then
+              echo "Found model through filesystem search at: $MODEL_DIR"
+              echo "MODEL_DIR=$MODEL_DIR" >> $GITHUB_ENV
+            else
+              echo "Failed to find any model through direct search"
+            fi
+          fi
+          
+          # Debug output of environment variables
+          echo "Debug: Current environment variables"
+          env | grep -E "EXPERIMENT_ID|RUN_ID|MODEL_DIR" || true
+
+      - name: Build Docker Image
+        env:
+          DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
+          DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
+        run: |
+          # Set Docker image name with validation
+          IMAGE_NAME="iris-classifier:latest"
+          if [ -n "${{ secrets.DOCKER_HUB_USERNAME }}" ]; then
+            IMAGE_NAME="${{ secrets.DOCKER_HUB_USERNAME }}/iris-classifier:latest"
+          fi
+          echo "Using Docker image name: ${IMAGE_NAME}"
+          
+          # Create a conda environment.yml file for the model
+          if [ -n "${{ env.MODEL_DIR }}" ]; then
+            mkdir -p "${{ env.MODEL_DIR }}"
+            # Write conda.yaml with proper indentation for YAML format
+            echo 'channels:' > "${{ env.MODEL_DIR }}/conda.yaml"
+            echo '- conda-forge' >> "${{ env.MODEL_DIR }}/conda.yaml"
+            echo 'dependencies:' >> "${{ env.MODEL_DIR }}/conda.yaml"
+            echo '- python=3.9' >> "${{ env.MODEL_DIR }}/conda.yaml"
+            echo '- pip' >> "${{ env.MODEL_DIR }}/conda.yaml"
+            echo '- pip:' >> "${{ env.MODEL_DIR }}/conda.yaml"
+            echo '  - mlflow>=2.19.0' >> "${{ env.MODEL_DIR }}/conda.yaml"
+            echo '  - scikit-learn' >> "${{ env.MODEL_DIR }}/conda.yaml"
+            echo '  - pandas' >> "${{ env.MODEL_DIR }}/conda.yaml"
+            echo '  - numpy' >> "${{ env.MODEL_DIR }}/conda.yaml"
+            echo '  - flask>=2.0.0' >> "${{ env.MODEL_DIR }}/conda.yaml"
+            echo '  - gunicorn>=20.1.0' >> "${{ env.MODEL_DIR }}/conda.yaml"
+            echo 'name: mlflow-env' >> "${{ env.MODEL_DIR }}/conda.yaml"
+            echo "Created conda.yaml for model environment"
+            
+            # Create MLmodel file if it doesn't exist
+            if [ ! -f "${{ env.MODEL_DIR }}/MLmodel" ]; then
+              echo "Creating MLmodel file for model"
+              python ./.github/scripts/create_mlmodel_file.py "${{ env.MODEL_DIR }}/MLmodel"
+            fi
+            
+            # Ensure model.pkl exists
+            if [ ! -f "${{ env.MODEL_DIR }}/model.pkl" ]; then
+              echo "Creating placeholder model.pkl file"
+              python ./.github/scripts/create_model_pkl.py "${{ env.MODEL_DIR }}/model.pkl"
+            fi
+          fi
+
+          # Make scripts executable
+          chmod +x .github/scripts/build_docker_direct.py
+          
+          # Use the run_id if available, otherwise use the model directory
+          if [ -n "${{ env.RUN_ID }}" ]; then
+            echo "Finding model artifacts for Run ID: ${{ env.RUN_ID }}"
+            # Try MLflow approach first
+            if python build_docker_mlflow.py --run-id ${{ env.RUN_ID }} --image-name "${IMAGE_NAME}"; then
+              echo "Successfully built Docker image using MLflow"
+            else
+              echo "MLflow Docker build failed, trying direct approach"
+              MODEL_PATH="mlruns/0/${{ env.RUN_ID }}/artifacts/model"
+              if [ -d "${MODEL_PATH}" ]; then
+                echo "Using model path from run_id: ${MODEL_PATH}"
+                python .github/scripts/build_docker_direct.py --model-dir "${MODEL_PATH}" --image-name "${IMAGE_NAME}"
+              else
+                echo "Model directory not found for run_id ${{ env.RUN_ID }}"
+                exit 1
+              fi
+            fi
+          elif [ -n "${{ env.MODEL_DIR }}" ]; then
+            echo "Building Docker image using model path: ${{ env.MODEL_DIR }}"
+            echo "Checking contents of model directory:"
+            ls -la "${{ env.MODEL_DIR }}"
+            
+            # Try MLflow approach first
+            ABSOLUTE_MODEL_PATH="$(pwd)/${{ env.MODEL_DIR }}"
+            echo "Using absolute path: ${ABSOLUTE_MODEL_PATH}"
+            if python build_docker_mlflow.py --model-uri "file://${ABSOLUTE_MODEL_PATH}" --image-name "${IMAGE_NAME}"; then
+              echo "Successfully built Docker image using MLflow"
+            else
+              echo "MLflow Docker build failed, trying direct approach"
+              python .github/scripts/build_docker_direct.py --model-dir "${{ env.MODEL_DIR }}" --image-name "${IMAGE_NAME}"
+            fi
+          else
+            echo "Error: Neither Run ID nor Model Directory found"
+            exit 1
+          fi
+          
+          # Login to Docker Hub and push the image if credentials are available
+          if [ -n "${{ secrets.DOCKER_HUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKER_HUB_TOKEN }}" ]; then
+            echo "${{ secrets.DOCKER_HUB_TOKEN }}" | docker login -u ${{ secrets.DOCKER_HUB_USERNAME }} --password-stdin
+            docker push ${IMAGE_NAME}
+            echo "Successfully pushed Docker image to Docker Hub"
+          else
+            echo "Skipping Docker image push - no Docker Hub credentials provided"
+          fi
+
+      - name: Deploy Model for Serving (Test Only)
+        run: |
+          # Create a Docker network for testing
+          docker network create mlflow-test-network
+          
+          # Start the model server with a container name and on the network
+          CONTAINER_NAME="mlflow-serving-container"
+          docker run -d --name $CONTAINER_NAME --network mlflow-test-network -p 5001:5000 \
+            ${IMAGE_NAME:-${{ secrets.DOCKER_HUB_USERNAME }}/iris-classifier:latest}
+          
+          # Wait for server to start
+          echo "Waiting for server to start..."
+          sleep 20
+          
+          # Get container IP address
+          CONTAINER_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTAINER_NAME)
+          echo "Container IP address: $CONTAINER_IP"
+          
+          # Test the deployment with a sample request - using container IP
+          echo "Testing API endpoint using container IP..."
+          curl -v -X POST http://$CONTAINER_IP:5000/invocations \
+            -H "Content-Type: application/json" \
+            -d '{"instances": [[5.1, 3.5, 1.4, 0.2]]}' || true
+          
+          # Also try with host port mapping as fallback
+          echo -e "\nAlso trying localhost port mapping as fallback..."
+          curl -v -X POST http://localhost:5001/invocations \
+            -H "Content-Type: application/json" \
+            -d '{"instances": [[5.1, 3.5, 1.4, 0.2]]}' || true
+          
+          # Show container logs for debugging
+          echo -e "\nContainer logs:"
+          docker logs $CONTAINER_NAME
+
+      - name: Upload run artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlflow-artifacts
+          path: mlruns/

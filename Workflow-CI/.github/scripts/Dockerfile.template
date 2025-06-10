@@ -1,0 +1,15 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install dependencies
+RUN pip install --no-cache-dir mlflow>=2.19.0 scikit-learn pandas numpy flask gunicorn
+
+# Copy the model files
+COPY ./model_artifacts/ /app/model/
+
+# Expose port for MLflow serving
+EXPOSE 5000
+
+# Command to run MLflow serving
+CMD ["mlflow", "models", "serve", "-m", "/app/model", "-p", "5000", "--host", "0.0.0.0"]

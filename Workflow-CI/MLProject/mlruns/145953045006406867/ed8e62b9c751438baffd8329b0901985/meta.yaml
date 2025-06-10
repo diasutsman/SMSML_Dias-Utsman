@@ -1,0 +1,15 @@
+artifact_uri: file:./artifacts
+end_time: 1749526019804
+entry_point_name: ''
+experiment_id: '145953045006406867'
+lifecycle_stage: active
+run_id: ed8e62b9c751438baffd8329b0901985
+run_name: RandomForest-Tuned
+run_uuid: ed8e62b9c751438baffd8329b0901985
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1749525969753
+status: 3
+tags: []
+user_id: du
